@@ -1,0 +1,244 @@
+---
+title: "Assignment 7: Smart Beta, Fundamental Indexing, Factor Investing and Stock Returns"
+format: html
+author: Keyi Wang
+date: 10/28/2022
+---
+
+# Fundamental Indexing
+import packages
+```{python}
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import datetime
+from sklearn.linear_model import LinearRegression
+import statsmodels.api as sm
+from scipy.stats import ttest_ind
+import sys
+import math
+from sklearn import linear_model
+
+if not sys.warnoptions:
+    import warnings
+    warnings.simplefilter("ignore")
+```
+Load compustat dataset and lag the dates by one fiscal year. 
+```{python}
+cols = ['at','sale','dv','dltis','dltr','sstk','prstkc','gvkey','fyear','datadate','indfmt','datafmt','popsrc','consol','lct','dltt','dlc','seq','lt','scf','ibc','xidoc','dpc','txdc','esubc','sppiv','fopo','fsrco','exre','capx','ivch','aqc','fuseo','sppe','siv','ivstch','ivaco','ni','nopi','spi','act','re','oiadp','prcc_f','csho','dp','pi']
+iter_csv = pd.read_csv('C:/Users/kwang648/Downloads/MGT6090/funda.csv', iterator=True, chunksize=1000,usecols = cols)
+compustat = pd.concat([chunk for chunk in iter_csv])
+
+compustat.loc[ ( compustat["indfmt"] == 'INDL' ) & ( compustat["datafmt"] == 'STD' ) &( compustat["popsrc"] == 'D') &( compustat["consol"]=='C' ) ]
+#convert datadate to datetime
+compustat['date'] = pd.to_datetime(compustat['datadate'].astype(str)) + pd.offsets.DateOffset(years = 1)
+compustat['month'] =  compustat['date'].dt.month
+```
+fill nan and filter on rows
+```{python}
+for col in compustat.loc[:, ~compustat.columns.isin(['gvkey', 'fyear'])]:
+    compustat.loc[:,col] = compustat.groupby('gvkey')[col].fillna(method='ffill').fillna(method='bfill')
+compustat = compustat.loc[( compustat["at"]-compustat["lct"] != 0 ) & ( ( compustat["dltt"] + compustat["dlc"] + compustat["seq"] ) != 0 ) & ( compustat['sale'] > 0 ) &( compustat['at'] != 0 ) ]
+```
+calculate fundamental variables
+```{python}
+#book value = total asset - total liability
+compustat['bv'] = compustat['at']-compustat['lt']
+#cash flow
+compustat.loc[compustat['scf'].isin([1,2,3]),'cf'] = compustat['ibc']+compustat['xidoc']+compustat['dpc']+compustat['txdc']+compustat['esubc']+compustat['sppiv']+compustat['fopo']+compustat['fsrco']
+compustat.loc[compustat['scf']==7,'cf'] = compustat['ibc']+compustat['xidoc']+compustat['dpc']+compustat['txdc']+compustat['esubc']+compustat['sppiv']+compustat['fopo']+compustat['exre']
+#revenue = sales + non-operating income and special items
+compustat['revenue'] = compustat['sale']+compustat['nopi']+compustat['spi']
+#investment
+compustat.loc[compustat['scf'].isin([1,2,3]),'iv'] = compustat['capx']+compustat['ivch']+compustat['aqc']+compustat['fuseo']-compustat['sppe']-compustat['siv']
+compustat.loc[compustat['scf']==7,'iv'] = compustat['capx']+compustat['ivch']+compustat['aqc']-compustat['sppe']-compustat['siv']-compustat['ivstch']-compustat['ivaco']
+#profitability
+compustat['profitability'] = compustat['ni']/compustat['at']
+#turnover = sale/(at(t)+at(t-1))/2
+compustat['at_shift'] = compustat.groupby('fyear')['at'].shift()
+compustat['turnover'] = compustat['sale']/((compustat['at']+compustat['at_shift'])/2)
+```
+calculate 5-year trailing average
+```{python}
+ratios = compustat.groupby(['gvkey','fyear'])['bv'].agg('mean').rolling(5).mean().reset_index()
+ratios['cf'] = compustat.groupby(['gvkey','fyear'])['cf'].agg('mean').rolling(5).mean().reset_index()['cf']
+ratios['revenue'] = compustat.groupby(['gvkey','fyear'])['revenue'].agg('mean').rolling(5).mean().reset_index()['revenue']
+ratios['sale'] = compustat.groupby(['gvkey','fyear'])['sale'].agg('mean').rolling(5).mean().reset_index()['sale']
+ratios['dv'] = compustat.groupby(['gvkey','fyear'])['dv'].agg('mean').rolling(5).mean().reset_index()['dv']
+ratios['iv'] = compustat.groupby(['gvkey','fyear'])['iv'].agg('mean').rolling(5).mean().reset_index()['iv']
+ratios['profitability'] = compustat.groupby(['gvkey','fyear'])['profitability'].agg('mean').rolling(5).mean().reset_index()['profitability']
+ratios['turnover'] = compustat.groupby(['gvkey','fyear'])['turnover'].agg('mean').rolling(5).mean().reset_index()['turnover']
+```
+calculate Altman Z-score
+```{python}
+compustat['A_z'] = (compustat['act']-compustat['lct'])/compustat['at']
+compustat['B_z'] = compustat['re']/compustat['at']
+compustat['C_z'] = compustat['oiadp']/compustat['at']
+compustat['D_z'] = compustat['prcc_f']*compustat['csho']/compustat['lt']
+compustat['E_z'] = compustat['sale']/compustat['at']
+compustat['altman_z'] = 1.2*compustat['A_z']+1.4*compustat['B_z']+3.3*compustat['C_z']+0.6*compustat['D_z']+0.99*compustat['E_z']
+```
+convert to annual altman z-score
+```{python}
+ratios['altman_z'] = compustat.groupby(['gvkey','fyear'])['altman_z'].agg('mean').reset_index()['altman_z']
+```
+calculate Ohlson O-score
+```{python}
+compustat['A_o'] = np.log2(compustat['at'])
+compustat['B_o'] = compustat['lt']/compustat['at']
+compustat['C_o'] = (compustat['act']-compustat['lct'])/compustat['at']
+compustat['D_o'] = compustat['lct']/compustat['act']
+compustat['E_o'] = compustat['ni']/compustat['at']
+compustat['F_o'] = (compustat['pi']+compustat['dp'])/compustat['lt']
+compustat['G_o'] = compustat[['lt','at']].apply(lambda x: 1 if x['lt']>x['at'] else 0,axis=1)
+compustat['ni_shift'] = compustat.groupby('fyear')['ni'].shift()
+compustat['H_o'] = compustat[['ni','ni_shift']].apply(lambda x: 1 if x['ni']<0 and x['ni_shift']<0 else 0,axis=1)
+compustat['I_o'] = (compustat['ni'] - compustat['ni_shift']) / (abs(compustat['ni'])+abs(compustat['ni_shift']))
+compustat['ohlson_o'] =  -1.32 -0.407*compustat['A_o'] + 6.03*compustat['B_o'] - 1.43*compustat['C_o'] + 0.0757*compustat['D_o'] - 2.37*compustat['E_o'] - 1.83*compustat['F_o'] - 1.72*compustat['G_o'] + 0.285*compustat['H_o'] - 0.521*compustat['I_o']
+```
+```{python}
+ratios['ohlson_o'] = compustat.groupby(['gvkey','fyear'])['ohlson_o'].agg('mean').reset_index()['ohlson_o']
+```
+# calculate market variables using CRSP data
+here I selected MSF with 12 month of estimation period
+load the monthly data and lag the data by one month
+```{python}
+msf = pd.read_csv('C:/Users/kwang648/Downloads/A6/CRSP_MSF.csv',usecols = ['DATE','VWRETD','RET','PERMNO','HSICCD'])
+msf.rename(columns={'DATE': 'date','VWRETD':'vwretd'}, inplace=True)
+for i in msf[['vwretd','RET']]:
+    msf[i] = pd.to_numeric(msf[i],errors='coerce')
+    msf = msf.dropna()
+msf['date'] = pd.to_datetime(msf['date'].astype(str),format='%Y%m%d')+pd.offsets.DateOffset(months = 1)
+msf['year'] = pd.DatetimeIndex(msf['date']).year.astype(str)
+msf['month'] = pd.DatetimeIndex(msf['date']).month.astype(str)
+```
+load monthly risk free rate and combine with msf
+```{python}
+rf_monthly= pd.read_csv("C:/Users/kwang648/Downloads/A6/KF_data.csv")[['DATE','RF']]
+rf_monthly['year'] = rf_monthly['DATE'].str.slice(0,4)
+rf_monthly['month'] = rf_monthly['DATE'].str.slice(4,6)
+rf_monthly = rf_monthly.drop(['DATE'],axis=1)
+rf_monthly.drop(rf_monthly[rf_monthly['RF']=='RF'].index,inplace=True)
+rf_monthly['RF'] = pd.to_numeric(rf_monthly['RF'])
+msf_rf = rf_monthly.merge(msf,on=['year','month']).drop(['year','month'],axis=1)
+```
+define function that generates dataset within given period after stock's IPO
+```{python}
+def return_after_IPO(data,month):
+    IPO = data.groupby('PERMNO')['date'].agg('min').reset_index()
+    month = int(month)
+    #less than 1 year
+    if month // 12 == 0:
+        end_date = pd.concat([IPO['PERMNO'],IPO['date'] + pd.offsets.DateOffset(months = month)],axis=1)
+    if month // 12 > 0:
+        year = month / 12
+        end_date = pd.concat([IPO['PERMNO'],IPO['date'] + pd.offsets.DateOffset(years = year)],axis=1)
+    
+    grouped_comp = data.groupby('PERMNO')
+    comp_keys = grouped_comp.groups.keys()
+    after_IPO = pd.DataFrame()
+    for i in comp_keys:
+        temp = grouped_comp.get_group(i)
+        end = end_date[end_date['PERMNO']==i]['date'].values[0]
+        temp = temp[temp['date']<=end]
+        after_IPO = pd.concat([after_IPO,temp])
+    return after_IPO
+```
+calculate excess return of each security and market portfolio
+```{python}
+def calc_excess_return (data):
+    data['r_i'] = data['RET']-data['RF']
+    data['MKT_i'] = data['vwretd']-data['RF']
+    return data
+```
+```{python}
+def linear_regression(data):
+    x=data['MKT_i'].to_numpy().reshape(-1,1)
+    y=data['r_i'].to_numpy()
+    reg = LinearRegression().fit(x,y)
+    beta = reg.coef_[0]
+    return beta
+```
+calculate Beta
+```{python}
+month_12_msf = calc_excess_return(return_after_IPO(msf_rf[pd.DatetimeIndex(msf_rf['date']).year>=1995],12))[['date','r_i','MKT_i','PERMNO']]
+beta_12_msf = month_12_msf.groupby([pd.DatetimeIndex(month_12_msf['date']).year,'PERMNO'])[['MKT_i','r_i']].apply(linear_regression).reset_index()
+beta_12_msf.columns = ['date','PERMNO','beta_12_msf']
+beta_12_msf
+```
+calculate total volatility = standard deviation of stock's return for each year
+```{python}
+total_volatility = pd.DataFrame(columns = ['date','total_volatility'])
+grouped_year = month_12_msf.groupby(pd.DatetimeIndex(month_12_msf['date']).year)
+year_keys = grouped_year.groups.keys()
+for i in year_keys:
+    temp = grouped_year.get_group(i)
+    mean = temp['r_i'].mean()
+    a = math.sqrt(temp['r_i'].apply(lambda x: (x-mean)**2).sum())
+    total_volatility.loc[len(total_volatility)]= [i,a]
+```
+for each year, for each stock i, calculate annualized volatility expressed as a percentage
+```{python}
+volatility = pd.DataFrame(columns = ['date','PERMNO','volatility'])
+grouped = month_12_msf.groupby([pd.DatetimeIndex(month_12_msf['date']).year,'PERMNO'])
+keys = grouped.groups.keys()
+for i in keys :
+    temp = grouped.get_group(i)
+    mean = temp['r_i'].mean()
+    vol = 100 * math.sqrt(temp['r_i'].agg(lambda x: (x-mean)**2).sum()/(temp['r_i'].agg('count')-1)) * math.sqrt(12)
+    volatility.loc[len(volatility)]= [i[0],i[1],vol]
+```
+another measure of  annualized volatility, assuming Ri = 0
+```{python}
+volatility_0 = pd.DataFrame(columns = ['date','PERMNO','volatility_0'])
+for i in keys:
+    temp = grouped.get_group(i)
+    vol = 100 * math.sqrt(temp['r_i'].agg(lambda x: (x)**2).sum()/(temp['r_i'].agg('count')-1)) * math.sqrt(12)
+    volatility_0.loc[len(volatility_0)]= [i[0],i[1],vol]
+```
+# Idiosyncratic volatility
+import fama-french data and MOM data
+```{python}
+ff_3_factor = pd.read_csv('C:/Users/kwang648/Downloads/MGT6090/data/fama-french-3-factor.csv')
+mom_factor =  pd.read_csv('C:/Users/kwang648/Downloads/MGT6090/data/mom-factor.csv')
+ff= ff_3_factor.merge(mom_factor,on='date')
+ff['year'] = ff['date'].astype(str).str.slice(0,4)
+ff['month'] = ff['date'].astype(str).str.slice(4,6)
+```
+merge msf with fama-french data
+```{python}
+msf_ff =calc_excess_return(msf.merge(ff,on=['year','month'])).drop(['MKT_i'],axis=1)
+```
+run regression on the three models
+```{python}
+reg_1 = linear_model.LinearRegression().fit(msf_ff['Mkt-RF'].to_numpy().reshape(-1,1),msf_ff['r_i'])
+reg_2 = linear_model.LinearRegression().fit(msf_ff[['Mkt-RF','SMB','HML']],msf_ff['r_i'])
+reg_3 = linear_model.LinearRegression().fit(msf_ff[['Mkt-RF','SMB','HML','mom']],msf_ff['r_i'])
+```
+calculate the residuals for the three regressions
+```{python}
+msf_ff['reg1_residual'] = msf_ff['r_i'] - reg_1.predict(msf_ff['Mkt-RF'].to_numpy().reshape(-1,1))
+msf_ff['reg2_residual'] = msf_ff['r_i'] - reg_2.predict(msf_ff[['Mkt-RF','SMB','HML']])
+msf_ff['reg3_residual'] = msf_ff['r_i'] - reg_3.predict(msf_ff[['Mkt-RF','SMB','HML','mom']])
+```
+calculate the residual standard error for each company
+```{python}
+n=len(np.unique(msf_ff['year']))
+rse = msf_ff.groupby(['PERMNO']).apply(lambda x: math.sqrt((x['reg1_residual']**2).sum()/(n-2))).reset_index()
+rse.columns = ['PERMNO','rse_1']
+rse['rse_2'] = msf_ff.groupby(['PERMNO']).apply(lambda x: math.sqrt((x['reg2_residual']**2).sum()/(n-4))).reset_index()[0]
+rse['rse_3'] = msf_ff.groupby(['PERMNO']).apply(lambda x: math.sqrt((x['reg3_residual']**2).sum()/(n-5))).reset_index()[0]
+```
+calculate Idiosyncratic volatility
+```{python}
+rse['idiovol_1'] = 100 * rse['rse_1'] * math.sqrt(12)
+rse['idiovol_2'] = 100 * rse['rse_2'] * math.sqrt(12)
+rse['idiovol_3'] = 100 * rse['rse_3'] * math.sqrt(12)
+```
+# construct smart beta portfolio using ranking of each fundamental variables
+restrict stocks with market capitalization of $100 million
+restrict stocks with a stock price greater than $5
+```{python}
+universe = pd.read_csv('C:/Users/kwang648/Downloads/A6/CRSP_MSF.csv',nrows=10)
+```
