@@ -167,18 +167,18 @@ calculate Beta
 month_12_msf = calc_excess_return(return_after_IPO(msf_rf[pd.DatetimeIndex(msf_rf['date']).year>=1970],12))[['date','r_i','MKT_i','PERMNO']]
 beta_12_msf = month_12_msf.groupby([pd.DatetimeIndex(month_12_msf['date']).year,'PERMNO'])[['MKT_i','r_i']].apply(linear_regression).reset_index()
 beta_12_msf.columns = ['date','PERMNO','beta_12_msf']
-beta_12_msf
+beta_12_msf = beta_12_msf[beta_12_msf['beta_12_msf']!=0]
 ```
 calculate total volatility = standard deviation of stock's return for each year
 ```{python}
-total_volatility = pd.DataFrame(columns = ['date','total_volatility'])
-grouped_year = month_12_msf.groupby(pd.DatetimeIndex(month_12_msf['date']).year)
+total_volatility = pd.DataFrame(columns = ['date','PERMNO','total_volatility'])
+grouped_year = month_12_msf.groupby([pd.DatetimeIndex(month_12_msf['date']).year,'PERMNO'])
 year_keys = grouped_year.groups.keys()
 for i in year_keys:
     temp = grouped_year.get_group(i)
     mean = temp['r_i'].mean()
     a = math.sqrt(temp['r_i'].apply(lambda x: (x-mean)**2).sum())
-    total_volatility.loc[len(total_volatility)]= [i,a]
+    total_volatility.loc[len(total_volatility)]= [i[0],i[1],a]
 ```
 for each year, for each stock i, calculate annualized volatility expressed as a percentage
 ```{python}
@@ -386,26 +386,118 @@ hml_diff
 # construct smart beta portfolio using ranking of each market variables
 merge the market variables with msf data. 
 ```{python}
-ratios['fyear'] = ratios['fyear'].astype(int)
-msf1['year'] = msf1['year'].astype(int)
-merge = pd.merge(msf1,ratios,left_on=['PERMCO','year'],right_on=['gvkey','fyear']).drop(['gvkey','fyear'],axis=1)
-merge['month'] = merge['month'].astype(int)
+beta_12_msf['date'] = beta_12_msf['date'].astype(int)
+volatility['date'] = volatility['date'].astype(int)
+total_volatility['date'] = total_volatility['date'].astype(int)
+volatility_0['date'] = volatility_0['date'].astype(int)
+
+beta_12_msf['PERMNO'] = beta_12_msf['PERMNO'].astype(int)
+volatility['PERMNO'] = volatility['PERMNO'].astype(int)
+total_volatility['PERMNO'] = total_volatility['PERMNO'].astype(int)
+volatility_0['PERMNO'] = volatility_0['PERMNO'].astype(int)
+
+market_var = beta_12_msf.merge(total_volatility,on=['date','PERMNO']).merge(volatility,on=['date','PERMNO']).merge(volatility_0,on=['date','PERMNO'])
+msf2 = msf2[msf2['year']>=1970]
+msf_merge = pd.merge(msf2,market_var,left_on=['year','PERMNO'],right_on=['date','PERMNO'])
 ```
-rank based on fundamental variable of first month
+rank based on market variable of first month
 ```{python}
-def value_weighted_average(x,weight):
-    return np.average(x['RET'],weights=x[weight])
-```
-```{python}
-grouped_yr = merge.groupby('year')
-yr_key = grouped_yr.groups.keys()
-ret = pd.DataFrame(np.unique(merge['year']),columns= ['year'])
-for col in merge[['bv','cf','revenue','sale','dv','iv','profitability','turnover','altman_z','ohlson_o']]:
-    port_ret = pd.DataFrame(columns = ['year','ret'])
-    for i in yr_key:
-        temp = grouped_yr.get_group(i)
+grouped_yr_m = msf_merge.groupby('year')
+yr_key_m = grouped_yr_m.groups.keys()
+ret_m = pd.DataFrame(np.unique(msf_merge['year']),columns= ['year'])
+for col in msf_merge[['beta_12_msf','total_volatility','volatility','volatility_0']]:
+    port_ret_m = pd.DataFrame(columns = ['year','ret'])
+    for i in yr_key_m:
+        temp = grouped_yr_m.get_group(i)
         temp['rank'] = temp[temp['month']==1][col].rank()
-        port_ret.loc[len(port_ret)]= [i,value_weighted_average(temp,col)]
-    ret[col] = port_ret['ret']
-ret
+        port_ret_m.loc[len(port_ret_m)]= [i,value_weighted_average(temp,col)]
+    ret_m[col] = port_ret_m['ret']
+ret_m
+```
+visualize the return over time relative to VWRETD returns
+```{python}
+for col in ret_m[['beta_12_msf','total_volatility','volatility','volatility_0']]:
+    plt.plot(ret_m['year'],ret_m[col])
+    plt.plot(vwretd['year'],vwretd['vwretd'])
+    plt.show()
+```
+plot with NBER to see how returns vary with the business cycle
+```{python}
+for col in ret_m[['beta_12_msf','total_volatility','volatility','volatility_0']]:
+    plt.plot(ret_m['year'],ret_m[col])
+    plt.plot(nber['year'],nber['USREC'])
+    plt.show()
+```
+returns = portfolio - rf 
+```{python}
+ret1_m = pd.DataFrame(np.unique(msf_merge['year']),columns= ['year'])
+for col in ret_m[['beta_12_msf','total_volatility','volatility','volatility_0']]:
+    ret1_m[col] = ret_m[col] - rf['RF']
+ret1_m
+```
+excess returns (over VWRETD returns) = portfolio return - vwretd
+```{python}
+excess_return_m = pd.DataFrame(np.unique(msf_merge['year']),columns= ['year'])
+for col in ret_m[['beta_12_msf','total_volatility','volatility','volatility_0']]:
+    excess_return_m[col] = ret_m[col] - vwretd['vwretd']
+excess_return_m
+```
+voltility, skewness, kurtosis
+```{python}
+vol_m = pd.DataFrame(np.unique(msf_merge['year']),columns= ['year'])
+skewness_m = pd.DataFrame(np.unique(msf_merge['year']),columns= ['year'])
+kurtosis_m = pd.DataFrame(np.unique(msf_merge['year']),columns= ['year'])
+for col in ret_m[['beta_12_msf','total_volatility','volatility','volatility_0']]:
+    vol1 = pd.DataFrame(columns = ['year','vol'])
+    skewness1 = pd.DataFrame(columns = ['year','skewness'])
+    kurtosis1 = pd.DataFrame(columns = ['year','kurtosis'])
+    for i in yr_key_m:
+        temp = grouped_yr_m.get_group(i)
+        vol2 = temp['RET'].std()
+        skewness2 = temp['RET'].skew()
+        kurtosis2 = temp['RET'].kurtosis()
+        vol1.loc[len(vol1)]= [i,vol2]
+        skewness1.loc[len(skewness1)] = [i,skewness2]
+        kurtosis1.loc[len(kurtosis1)] = [i,kurtosis2]
+    vol_m[col] = vol1['vol']
+    skewness_m[col] = skewness1['skewness']
+    kurtosis_m[col] = kurtosis1['kurtosis']
+vol_m
+```
+```{python}
+skewness_m
+```
+```{python}
+kurtosis_m
+```
+Sharpe Ratio = return of portfolio - risk free return / volatility of portfolio
+information ratio = return of portfolio - vwretd / total volatility
+```{python}
+sharpe_m = pd.DataFrame(np.unique(msf_merge['year']),columns= ['year'])
+information_m = pd.DataFrame(np.unique(msf_merge['year']),columns= ['year'])
+for col in ret_m[['beta_12_msf','total_volatility','volatility','volatility_0']]:
+    sharpe_m[col] = (ret_m[col].astype(int)-rf['RF'].astype(int))/(vol_m[col])
+    information_m[col] = (ret_m[col] - vwretd['vwretd'])/(volatility_all['volatility'])
+sharpe_m
+```
+```{python}
+information_m
+```
+compare return with MKT, SMB, HML from fama-french data
+MKT
+```{python}
+ret_mkt_diff_m = pd.DataFrame(np.unique(msf_merge['year']),columns= ['year'])
+smb_diff_m= pd.DataFrame(np.unique(msf_merge['year']),columns= ['year'])
+hml_diff_m= pd.DataFrame(np.unique(msf_merge['year']),columns= ['year'])
+for col in ret_m[['beta_12_msf','total_volatility','volatility','volatility_0']]:
+    ret_mkt_diff_m[col] = ret_m[col]-mkt['Mkt-RF']
+    smb_diff_m[col] = ret_m[col]-smb['SMB']
+    hml_diff_m[col] = ret_m[col] - hml['HML']
+ret_mkt_diff_m
+```
+```{python}
+smb_diff_m
+```
+```{python}
+hml_diff_m
 ```
