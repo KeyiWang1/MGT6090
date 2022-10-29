@@ -242,3 +242,4 @@ restrict stocks with a stock price greater than $5
 ```{python}
 universe = pd.read_csv('C:/Users/kwang648/Downloads/A6/CRSP_MSF.csv',nrows=10)
 ```
+write something new
