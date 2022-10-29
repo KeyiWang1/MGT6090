@@ -19,6 +19,7 @@ from scipy.stats import ttest_ind
 import sys
 import math
 from sklearn import linear_model
+from statsmodels.stats.weightstats import DescrStatsW
 
 if not sys.warnoptions:
     import warnings
@@ -104,7 +105,7 @@ ratios['ohlson_o'] = compustat.groupby(['gvkey','fyear'])['ohlson_o'].agg('mean'
 here I selected MSF with 12 month of estimation period
 load the monthly data and lag the data by one month
 ```{python}
-msf = pd.read_csv('C:/Users/kwang648/Downloads/A6/CRSP_MSF.csv',usecols = ['DATE','VWRETD','RET','PERMNO','HSICCD'])
+msf = pd.read_csv('C:/Users/kwang648/Downloads/A6/CRSP_MSF.csv',usecols = ['DATE','VWRETD','RET','PERMNO','HSICCD','PRC','SHROUT','PERMCO'])
 msf.rename(columns={'DATE': 'date','VWRETD':'vwretd'}, inplace=True)
 for i in msf[['vwretd','RET']]:
     msf[i] = pd.to_numeric(msf[i],errors='coerce')
@@ -112,6 +113,7 @@ for i in msf[['vwretd','RET']]:
 msf['date'] = pd.to_datetime(msf['date'].astype(str),format='%Y%m%d')+pd.offsets.DateOffset(months = 1)
 msf['year'] = pd.DatetimeIndex(msf['date']).year.astype(str)
 msf['month'] = pd.DatetimeIndex(msf['date']).month.astype(str)
+msf['MKTCAP'] = abs(msf['PRC']) * msf['SHROUT']
 ```
 load monthly risk free rate and combine with msf
 ```{python}
@@ -162,7 +164,7 @@ def linear_regression(data):
 ```
 calculate Beta
 ```{python}
-month_12_msf = calc_excess_return(return_after_IPO(msf_rf[pd.DatetimeIndex(msf_rf['date']).year>=1995],12))[['date','r_i','MKT_i','PERMNO']]
+month_12_msf = calc_excess_return(return_after_IPO(msf_rf[pd.DatetimeIndex(msf_rf['date']).year>=1970],12))[['date','r_i','MKT_i','PERMNO']]
 beta_12_msf = month_12_msf.groupby([pd.DatetimeIndex(month_12_msf['date']).year,'PERMNO'])[['MKT_i','r_i']].apply(linear_regression).reset_index()
 beta_12_msf.columns = ['date','PERMNO','beta_12_msf']
 beta_12_msf
@@ -240,6 +242,170 @@ rse['idiovol_3'] = 100 * rse['rse_3'] * math.sqrt(12)
 restrict stocks with market capitalization of $100 million
 restrict stocks with a stock price greater than $5
 ```{python}
-universe = pd.read_csv('C:/Users/kwang648/Downloads/A6/CRSP_MSF.csv',nrows=10)
+msf1 = msf[msf['PRC']>5]
+mktcap_year = msf.groupby(['PERMCO','year'])['MKTCAP'].sum().reset_index()
+mktcap_year = mktcap_year[mktcap_year['MKTCAP']>=100000000]
+msf2 = mktcap_year.merge(msf1,on=['year','PERMCO'])
+ratios = ratios[ratios['fyear'].astype(int)>=1970]
 ```
-write something new
+merge the fundamental variables with msf data. 
+```{python}
+ratios['fyear'] = ratios['fyear'].astype(int)
+msf1['year'] = msf1['year'].astype(int)
+merge = pd.merge(msf1,ratios,left_on=['PERMCO','year'],right_on=['gvkey','fyear']).drop(['gvkey','fyear'],axis=1)
+merge['month'] = merge['month'].astype(int)
+```
+rank based on fundamental variable of first month
+```{python}
+def value_weighted_average(x,weight):
+    return np.average(x['RET'],weights=x[weight])
+```
+```{python}
+grouped_yr = merge.groupby('year')
+yr_key = grouped_yr.groups.keys()
+ret = pd.DataFrame(np.unique(merge['year']),columns= ['year'])
+for col in merge[['bv','cf','revenue','sale','dv','iv','profitability','turnover','altman_z','ohlson_o']]:
+    port_ret = pd.DataFrame(columns = ['year','ret'])
+    for i in yr_key:
+        temp = grouped_yr.get_group(i)
+        temp['rank'] = temp[temp['month']==1][col].rank()
+        port_ret.loc[len(port_ret)]= [i,value_weighted_average(temp,col)]
+    ret[col] = port_ret['ret']
+ret
+```
+visualize the returnv over time relative to VWRETD returns
+```{python}
+vwretd = msf2.groupby('year')['vwretd'].mean().reset_index()
+for col in ret[['bv','cf','revenue','sale','dv','iv','profitability','turnover','altman_z','ohlson_o']]:
+    plt.plot(ret['year'],ret[col])
+    plt.plot(vwretd['year'],vwretd['vwretd'])
+    plt.show()
+```
+plot with NBER to see how returns vary with the business cycle
+```{python}
+nber = pd.read_csv('C:/Users/kwang648/Downloads/MGT6090/data/USREC.csv')
+nber['year'] = pd.DatetimeIndex(nber['DATE']).year
+nber['month'] = pd.DatetimeIndex(nber['DATE']).month
+nber = nber[nber['year'].astype(int)>=1970]
+recession = nber.groupby('year')['USREC'].agg('sum').reset_index()
+for col in ret[['bv','cf','revenue','sale','dv','iv','profitability','turnover','altman_z','ohlson_o']]:
+    plt.plot(ret['year'],ret[col])
+    plt.plot(nber['year'],nber['USREC'])
+    plt.show()
+```
+returns = portfolio - rf 
+```{python}
+def compound(x):
+    final = 1
+    n=len(x)
+    for i in x:
+        final=final*(1+i)**(1/n)
+    return final-1
+```
+```{python}
+rf = ff[ff['year'].astype(int)>=1970].groupby('year')['RF'].agg(compound).reset_index()
+ret1 = pd.DataFrame(np.unique(merge['year']),columns= ['year'])
+for col in ret[['bv','cf','revenue','sale','dv','iv','profitability','turnover','altman_z','ohlson_o']]:
+    ret1[col] = ret[col] - rf['RF']
+ret1
+```
+excess returns (over VWRETD returns) = portfolio return - vwretd
+```{python}
+excess_return = pd.DataFrame(np.unique(merge['year']),columns= ['year'])
+for col in ret[['bv','cf','revenue','sale','dv','iv','profitability','turnover','altman_z','ohlson_o']]:
+    excess_return[col] = ret[col] - vwretd['vwretd']
+excess_return
+```
+voltility, skewness, kurtosis
+```{python}
+vol = pd.DataFrame(np.unique(merge['year']),columns= ['year'])
+skewness = pd.DataFrame(np.unique(merge['year']),columns= ['year'])
+kurtosis = pd.DataFrame(np.unique(merge['year']),columns= ['year'])
+for col in ret[['bv','cf','revenue','sale','dv','iv','profitability','turnover','altman_z','ohlson_o']]:
+    vol1 = pd.DataFrame(columns = ['year','vol'])
+    skewness1 = pd.DataFrame(columns = ['year','skewness'])
+    kurtosis1 = pd.DataFrame(columns = ['year','kurtosis'])
+    for i in yr_key:
+        temp = grouped_yr.get_group(i)
+        vol2 = temp['RET'].std()
+        skewness2 = temp['RET'].skew()
+        kurtosis2 = temp['RET'].kurtosis()
+        vol1.loc[len(vol1)]= [i,vol2]
+        skewness1.loc[len(skewness1)] = [i,skewness2]
+        kurtosis1.loc[len(kurtosis1)] = [i,kurtosis2]
+    vol[col] = vol1['vol']
+    skewness[col] = skewness1['skewness']
+    kurtosis[col] = kurtosis1['kurtosis']
+vol
+```
+```{python}
+skewness
+```
+```{python}
+kurtosis
+```
+Sharpe Ratio = return of portfolio - risk free return / volatility of portfolio
+information ratio = return of portfolio - vwretd / total volatility
+```{python}
+sharpe = pd.DataFrame(np.unique(merge['year']),columns= ['year'])
+information = pd.DataFrame(np.unique(merge['year']),columns= ['year'])
+volatility_all = volatility.groupby('date')['volatility'].mean().reset_index()
+volatility_all['volatility'] = volatility_all['volatility']/100
+for col in ret[['bv','cf','revenue','sale','dv','iv','profitability','turnover','altman_z','ohlson_o']]:
+    sharpe[col] = (ret[col].astype(int)-rf['RF'].astype(int))/(vol[col])
+    information[col] = (ret[col] - vwretd['vwretd'])/(volatility_all['volatility'])
+sharpe
+```
+```{python}
+information
+```
+compare return with MKT, SMB, HML from fama-french data
+MKT
+```{python}
+mkt = ff[ff['year'].astype(int)>=1970].groupby('year')['Mkt-RF'].sum().reset_index()
+mkt['Mkt-RF'] = mkt['Mkt-RF']/100
+smb = ff[ff['year'].astype(int)>=1970].groupby('year')['SMB'].sum().reset_index()
+smb['SMB'] = smb['SMB']/100
+hml = ff[ff['year'].astype(int)>=1970].groupby('year')['HML'].sum().reset_index()
+hml['HML'] = hml['HML']/100
+ret_mkt_diff = pd.DataFrame(np.unique(merge['year']),columns= ['year'])
+smb_diff= pd.DataFrame(np.unique(merge['year']),columns= ['year'])
+hml_diff= pd.DataFrame(np.unique(merge['year']),columns= ['year'])
+for col in ret[['bv','cf','revenue','sale','dv','iv','profitability','turnover','altman_z','ohlson_o']]:
+    ret_mkt_diff[col] = ret[col]-mkt['Mkt-RF']
+    smb_diff[col] = ret[col]-smb['SMB']
+    hml_diff[col] = ret[col] - hml['HML']
+ret_mkt_diff
+```
+```{python}
+smb_diff
+```
+```{python}
+hml_diff
+```
+# construct smart beta portfolio using ranking of each market variables
+merge the market variables with msf data. 
+```{python}
+ratios['fyear'] = ratios['fyear'].astype(int)
+msf1['year'] = msf1['year'].astype(int)
+merge = pd.merge(msf1,ratios,left_on=['PERMCO','year'],right_on=['gvkey','fyear']).drop(['gvkey','fyear'],axis=1)
+merge['month'] = merge['month'].astype(int)
+```
+rank based on fundamental variable of first month
+```{python}
+def value_weighted_average(x,weight):
+    return np.average(x['RET'],weights=x[weight])
+```
+```{python}
+grouped_yr = merge.groupby('year')
+yr_key = grouped_yr.groups.keys()
+ret = pd.DataFrame(np.unique(merge['year']),columns= ['year'])
+for col in merge[['bv','cf','revenue','sale','dv','iv','profitability','turnover','altman_z','ohlson_o']]:
+    port_ret = pd.DataFrame(columns = ['year','ret'])
+    for i in yr_key:
+        temp = grouped_yr.get_group(i)
+        temp['rank'] = temp[temp['month']==1][col].rank()
+        port_ret.loc[len(port_ret)]= [i,value_weighted_average(temp,col)]
+    ret[col] = port_ret['ret']
+ret
+```
