@@ -1,0 +1,126 @@
+---
+title: "Assignment 8: Risk Management"
+format: html
+author: Keyi Wang
+date: 11/06/2022
+seed: 903827172
+random number: 1996
+---
+import relevant packages
+```{r}
+library(dplyr)
+library(readr)
+library(data.table)
+library(tidyverse)
+```
+load the DSF data
+```{r}
+dsf<-fread('C:/Users/kwang648/Downloads/dsf_new-001.csv',select=c("DATE","PERMNO","RET","VWRETD"),showProgress =TRUE)
+```
+# 8.0 Random Sampling from the dataset
+```{r}
+#generage a random integer based on my GTID as seed
+set.seed(903827172)
+start_yr <- sample(1980:2010, 1)
+end_yr <-start_yr + 10 - 1
+```
+For the start year (1996), create a unique list of PERMNOS and randomly select 250 PERMNOS
+```{r}
+dsf1 <-dsf[sample(nrow(dsf), 10000), ]
+dsf1$DATE<-as.Date(as.character(dsf1$DATE),format="%Y%m%d")
+dsf1$year<-as.integer(format(dsf1$DATE, "%Y"))
+dsf1<-dsf1%>%filter(year>=1980)
+unique_PERMNO<-dsf1 %>% select(year,PERMNO) %>% filter(year==1996) %>% distinct(PERMNO)
+#randomly sample 250 PERMNOs
+portfolio<-sample_n(unique_PERMNO,250)
+```
+# 8.1: Semi Beta, Downside Beta, Co-skewness and Tail Risk
+import fama-french's dataset
+```{r}
+rf<-read.csv(file='C:/Users/kwang648/Downloads/F-F_Research_Data_Factors_daily.csv')
+rf$DATE<-as.Date(as.character(rf$DATE),format="%Y%m%d")
+rf<-rf %>% filter(as.integer(format(rf$DATE,"%Y"))>=1980)
+#merge rf with dsf
+dsf_rf<-merge(x=dsf1,y=rf,by='DATE')
+dsf_rf <-dsf_rf%>%select(DATE,PERMNO,RET,year,RF,VWRETD)
+dsf_rf$month<-as.integer(format(dsf_rf$DATE, "%m"))
+dsf_rf$RET<-as.numeric(dsf_rf$RET)
+dsf_rf<-na.omit(dsf_rf)
+dsf_rf
+```
+calculate excess return
+```{r}
+#demeaned excess return of each individual security i
+dsf_rf$excess_i<-dsf_rf$RET-dsf_rf$RF
+dsf_rf<-dsf_rf%>%group_by(PERMNO,month)%>%mutate(excess_mean = mean(excess_i))%>%ungroup()
+dsf_rf$demean_excess_i<-dsf_rf$excess_i-dsf_rf$excess_mean
+
+#demeaned market excess return
+dsf_rf<-dsf_rf%>%group_by(month)%>%mutate(market_mean = mean(VWRETD))%>%ungroup()
+dsf_rf$demean_excess_market<-dsf_rf$VWRETD-dsf_rf$market_mean
+```
+calculate signed intra-period asset returns
+```{r}
+dsf_rf$rtkip<-dsf_rf$demean_excess_i
+dsf_rf$rtkip[dsf_rf$rktip<0]<-0
+
+dsf_rf$rtkin<-dsf_rf$demean_excess_i
+dsf_rf$rtkin[dsf_rf$rktin>0]<-0
+```
+calculate signed intra-period market returns
+```{r}
+dsf_rf$ftkp<-dsf_rf$demean_excess_market
+dsf_rf$ftkp[dsf_rf$ftkp<0]<-0
+
+dsf_rf$ftkn<-dsf_rf$demean_excess_market
+dsf_rf$ftkn[dsf_rf$ftkn>0]<-0
+```
+calculate realized semi-betas using the signed decomposition calculated above
+```{r}
+betaN<-dsf_rf%>%group_by(year,month,PERMNO)%>%summarise(betaN=sum(rtkin*ftkn)/sum((demean_excess_market)^2))%>%select(betaN)
+betaP<-dsf_rf%>%group_by(year,month,PERMNO)%>%summarise(betaP=sum(rtkip*ftkp)/sum((demean_excess_market)^2))%>%select(betaP)
+betaMN<-dsf_rf%>%group_by(year,month,PERMNO)%>%summarise(betaMN=sum(rtkip*ftkn)/sum((demean_excess_market)^2))%>%select(betaMN)
+betaMP<-dsf_rf%>%group_by(year,month,PERMNO)%>%summarise(betaMP=sum(rtkin*ftkp)/sum((demean_excess_market)^2))%>%select(betaMP)
+#merge to one table
+semi_beta<-merge(x=betaN,y=betaP,by=c("year","month"))
+semi_beta<-merge(x=semi_beta,y=betaMN,by=c("year","month"))
+semi_beta<-merge(x=semi_beta,y=betaMP,by=c("year","month"))
+
+#put all data frames into list
+merge_list <- list(betaN, betaP, betaMN,betaMP)      
+
+#merge all data frames together
+semi_beta<- merge_list %>% reduce(full_join, by=c("year","month"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
