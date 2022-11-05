@@ -1,0 +1,231 @@
+---
+title: "Assignment 8: Risk Management"
+format: html
+author: Keyi Wang
+date: 11/06/2022
+seed: 903827172
+random number: 1996
+---
+import relevant packages
+```{r}
+library(dplyr)
+library(readr)
+library(data.table)
+library(tidyverse)
+library(cvar)
+library(broom)
+library(nlme)
+library(ggplot2)
+options(warn=-1)
+```
+load the DSF data
+```{r}
+dsf<-fread('C:/Users/kwang648/Downloads/MGT6090/data/dsf_new-001.csv',select=c("DATE","PERMNO","RET","VWRETD"),showProgress =TRUE)
+```
+# 8.0 Random Sampling from the dataset
+```{r}
+#generage a random integer based on my GTID as seed
+set.seed(903827172)
+start_yr <- sample(1980:2010, 1)
+end_yr <-start_yr + 10 - 1
+```
+For the start year (1996), create a unique list of PERMNOS and randomly select 250 PERMNOS
+```{r}
+dsf$DATE<-as.Date(as.character(dsf$DATE),format="%Y%m%d")
+dsf$year<-as.integer(format(dsf$DATE, "%Y"))
+dsf<-dsf%>%filter(year>=1980)
+unique_PERMNO<-dsf %>% select(year,PERMNO) %>% filter(year==1996) %>% distinct(PERMNO)
+#randomly sample 250 PERMNOs
+portfolio<-sample_n(unique_PERMNO,250)
+```
+# 8.1: Semi Beta, Downside Beta, Co-skewness and Tail Risk
+import fama-french's dataset
+```{r}
+rf<-read.csv(file='C:/Users/kwang648/Downloads/MGT6090/data/F-F_Research_Data_Factors_daily.csv')
+rf$DATE<-as.Date(as.character(rf$DATE),format="%Y%m%d")
+rf<-rf %>% filter(as.integer(format(rf$DATE,"%Y"))>=1980)
+#merge rf with dsf
+dsf_rf<-merge(x=dsf,y=rf,by='DATE')
+dsf_rf <-dsf_rf%>%select(DATE,PERMNO,RET,year,RF,VWRETD)
+dsf_rf$month<-as.integer(format(dsf_rf$DATE, "%m"))
+dsf_rf$RET<-as.numeric(dsf_rf$RET)
+dsf_rf<-na.omit(dsf_rf)
+dsf_rf$r<-dsf_rf$RET-dsf_rf$RF
+dsf_rf
+```
+calculate excess return
+```{r}
+#demeaned excess return of each individual security i
+dsf_rf$excess_i<-dsf_rf$RET-dsf_rf$RF
+dsf_rf<-dsf_rf%>%group_by(PERMNO,month)%>%mutate(excess_mean = mean(excess_i))%>%ungroup()
+dsf_rf$demean_excess_i<-dsf_rf$excess_i-dsf_rf$excess_mean
+
+#demeaned market excess return
+dsf_rf<-dsf_rf%>%group_by(month)%>%mutate(market_mean = mean(VWRETD))%>%ungroup()
+dsf_rf$demean_excess_market<-dsf_rf$VWRETD-dsf_rf$market_mean
+```
+calculate signed intra-period asset returns
+```{r}
+dsf_rf$rtkip<-dsf_rf$demean_excess_i
+dsf_rf$rtkip[dsf_rf$rtkip<0]<-0
+
+dsf_rf$rtkin<-dsf_rf$demean_excess_i
+dsf_rf$rtkin[dsf_rf$rtkin>0]<-0
+```
+calculate signed intra-period market returns
+```{r}
+dsf_rf$ftkp<-dsf_rf$demean_excess_market
+dsf_rf$ftkp[dsf_rf$ftkp<0]<-0
+
+dsf_rf$ftkn<-dsf_rf$demean_excess_market
+dsf_rf$ftkn[dsf_rf$ftkn>0]<-0
+```
+calculate realized semi-betas using the signed decomposition calculated above
+```{r}
+betaN<-dsf_rf%>%group_by(year,month,PERMNO)%>%summarise(betaN=(sum(rtkin*ftkn)/sum((demean_excess_market)^2)))
+betaP<-dsf_rf%>%group_by(year,month,PERMNO)%>%summarise(betaP=sum(rtkip*ftkp)/sum((demean_excess_market)^2))
+betaMN<-dsf_rf%>%group_by(year,month,PERMNO)%>%summarise(betaMN=-sum(rtkip*ftkn)/sum((demean_excess_market)^2))
+betaMP<-dsf_rf%>%group_by(year,month,PERMNO)%>%summarise(betaMP=-sum(rtkin*ftkp)/sum((demean_excess_market)^2))
+```
+Compute downbeta and upbeta.
+```{r}
+downbeta<-dsf_rf%>%group_by(year,month,PERMNO)%>%summarise(downbeta=(sum(demean_excess_i*ftkn)/sum((ftkn)^2)))
+upbeta<-dsf_rf%>%group_by(year,month,PERMNO)%>%summarise(upbeta=(sum(demean_excess_i*ftkp)/sum((ftkp)^2)))
+```
+compute coskewness and cokurtosis
+```{r}
+coskewness<-dsf_rf%>%group_by(year,month,PERMNO)%>%summarise(coskewness=(1/21)*(sum(demean_excess_i*(demean_excess_market)^2))/(sqrt((1/21)*sum(demean_excess_i^2))*(1/21)*sum(demean_excess_market^2)))
+cokurtosis<-dsf_rf%>%group_by(year,month,PERMNO)%>%summarise(cokurtosis=(1/21)*(sum(demean_excess_i*(demean_excess_market)^3))/(sqrt((1/21)*sum(demean_excess_i^2))*((1/21)*sum(demean_excess_market^2))^(3/2)))
+```
+merge all betas together
+```{r}
+#put all data frames into list
+merge_list <- list(betaN, betaP, betaMN,betaMP,downbeta,upbeta,coskewness,cokurtosis)      
+#merge all data frames together
+semi_beta<- merge_list %>% reduce(inner_join, by=c("year","month","PERMNO"))
+```
+compute beta as sum of the components
+```{r}
+semi_beta$beta<-semi_beta$betaP+semi_beta$betaN+semi_beta$betaMP+semi_beta$betaMN
+semi_beta<-na.omit(semi_beta)
+```
+# Assignment 8.2: Value-at-Risk (VaR) and Expected Shortfall (ES)
+## 1
+construct dataset for the portfolio for Jan 1996 to Dec 2005 period
+```{r}
+port_1 <- dsf_rf %>%select(DATE,year,r,PERMNO)%>% filter(year>=1996)%>%filter(year<=2005)%>%filter(PERMNO %in% portfolio$PERMNO)
+```
+
+calculate VaR
+```{r}
+port_1<-na.omit(port_1)
+VaR_1<-VaR(port_1$r, p_loss=0.05)
+VaR_1
+```
+The $VaR is equal to 1,000,000 * VaR
+```{r}
+1000000 * VaR_1
+```
+calculate Expected Shortfall
+```{r}
+ES(port_1$r, p_loss = 0.05)
+```
+
+## 2
+construct dataset for the portfolio for Jan 2000 to Dec 2010
+```{r}
+gc()
+port_2 <- dsf_rf%>%select(DATE,PERMNO,year,r)%>%filter(PERMNO %in% portfolio$PERMNO)%>%filter(year>=2000)%>%filter(year<=2010)
+```
+
+```{r}
+port_2<-na.omit(port_2)
+VaR_2<-VaR(port_2$r, p_loss=0.05)
+VaR_2
+```
+The $VaR is equal to 1,000,000 * VaR
+
+```{r}
+1000000 * VaR_2
+```
+calculate Expected Shortfall(ES)
+```{r}
+ES(port_2$r,p_loss=0.05)
+```
+# Assignment 8.3: Volatility modeling
+calculate variance of the portfolio as initial values of the equation
+```{r}
+initial_var<-port_1%>%group_by(DATE)%>%summarise(variance=var(r))
+#shift date of initial values by one to be able to use the formula for the same row
+initial_var$DATE_shift<-initial_var$DATE+1
+```
+randomly select 5 firms from the 250
+```{r}
+portfolio_2<-sample_n(portfolio,5)
+```
+generate predictive variance for the 5 selected firm, using the formula presented
+```{r}
+port_3<-port_2%>%filter(PERMNO %in% portfolio_2$PERMNO)%>%select(PERMNO,DATE,r)
+#merge with the initial variance
+port_3_merge<-merge(x=initial_var,y=port_3,by.x='DATE_shift',by.y='DATE')
+port_3_merge$pred_var<-0.94*port_3_merge$variance+0.06*(port_3_merge$r)^2
+```
+plot the time-series variance using simple Risk Metrics Model
+```{r}
+for (x in unique(port_3_merge$PERMNO)){
+  plot(port_3_merge$DATE[port_3_merge$PERMNO==x],port_3_merge$pred_var[port_3_merge$PERMNO==x],type="l")
+}
+```
+## GARCH
+### Using daily returns of these random sample of 250 firms, estimate alpha and beta according to the formula
+```{r}
+#shift the variance up by one row in order to apply the formula
+shift <- function(x, n){
+  c(x[-(seq(n))], rep(NA, n))
+}
+initial_var$variance_shift<-shift(initial_var$variance,1)
+port_1_merge<-merge(x=initial_var,y=port_1,by='DATE')%>%select(DATE,PERMNO,r,variance,variance_shift)
+```
+
+```{r}
+model<-lmList(variance_shift~variance+r^2|PERMNO,data=na.omit(port_1_merge))
+estimated_param<-coef(model)
+estimated_param$PERMNO<-rownames(estimated_param)
+estimated_param<-estimated_param%>%select(variance,r,PERMNO)%>%rename("beta"="variance","alpha"="r")
+```
+### using estimated parameters as initial variables and estimate variance for 5 randomly selected firms during Jan 2000 to Dec 2010
+```{r}
+#find the estimated parameters for the 5 selected firms
+param_3<-estimated_param%>%filter(PERMNO %in% portfolio_2$PERMNO)
+param_3_merge<-merge(x=param_3,y=port_3_merge,by='PERMNO')%>%select(PERMNO,beta,alpha,DATE,variance,r,pred_var)
+param_3_merge$pred_var_GARCH<-param_3_merge$beta*param_3_merge$variance+param_3_merge$alpha*param_3_merge$r^2
+param_3_merge$PERMNO<-as.numeric(param_3_merge$PERMNO)
+param_3_merge<-param_3_merge%>%arrange(DATE)
+```
+plot the time-series variance using GARCH model
+```{r}
+for (x in unique(param_3_merge$PERMNO)){
+  plot(param_3_merge$DATE[param_3_merge$PERMNO==x],param_3_merge$pred_var_GARCH[param_3_merge$PERMNO==x],type="l")
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
